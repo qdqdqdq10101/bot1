@@ -1,0 +1,355 @@
+import discord
+from discord.ext import commands
+import asyncio
+from discord.ui import Button, View
+
+# ============================================================
+# CONFIG
+# ============================================================
+TOKEN = "MTQ0NjgwMTU2NTI5NzE0ODAxNg.Gh3bcW.6zuYHXxl9_LwRL3-iG7c_rJLfRPMJRW3CLaREo"
+PREFIX = "+"
+STAFF_ROLE_ID = 1446803311498887300 # Replace with your staff role ID
+
+intents = discord.Intents.all()
+
+# ============================================================
+# BOT
+# ============================================================
+class TicketBot(commands.Bot):
+    async def setup_hook(self):
+        # Add all persistent views
+        self.add_view(TicketButton())
+        self.add_view(CloseTicketButton())
+        self.add_view(PaymentView())
+        self.add_view(PaidView())
+
+bot = TicketBot(command_prefix=PREFIX, intents=intents)
+
+STAFF_ROLE_MENTION = f"<@&{STAFF_ROLE_ID}>"
+
+# Track ongoing tickets
+ongoing_tickets = {}
+
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+def is_positive(msg):
+    positives = ["yes", "yep", "yeah", "ok", "y"]
+    return any(msg.startswith(p) for p in positives)
+
+def is_negative(msg):
+    negatives = ["no", "nah", "nop", "n"]
+    return any(msg.startswith(p) for p in negatives)
+
+# ============================================================
+# EVENTS
+# ============================================================
+@bot.event
+async def on_ready():
+    print(f"✔ Connected as {bot.user}")
+    print("✔ Persistent views loaded")
+
+# ============================================================
+# VIEWS / BUTTONS
+# ============================================================
+class TicketButton(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🎫 Open a VIP Ticket", style=discord.ButtonStyle.green, custom_id="open_ticket_button")
+    async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        staff_role = guild.get_role(STAFF_ROLE_ID)
+
+        channel_name = f"ticket-{interaction.user.name}".lower()
+
+        if discord.utils.get(guild.channels, name=channel_name):
+            return await interaction.response.send_message("❌ You already have an open ticket.", ephemeral=True)
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            staff_role: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        }
+
+        ticket_channel = await guild.create_text_channel(channel_name, overwrites=overwrites)
+
+        embed_close = discord.Embed(
+            title="🔒 Ticket Opened",
+            description="Press ❌ to close your ticket.",
+            color=0xe74c3c
+        )
+        await ticket_channel.send(embed=embed_close, view=CloseTicketButton())
+        await ticket_channel.send(f"Hello {interaction.user.mention}, are you interested in **VIP**?")
+
+        ongoing_tickets[ticket_channel.id] = "ASKING_VIP"
+
+        # logs
+        log_channel = discord.utils.get(guild.channels, name="🎟️・ticket-logs")
+        if log_channel:
+            await log_channel.send(f"🟢 Ticket opened by {interaction.user.mention} → {ticket_channel.mention}")
+
+        await interaction.response.send_message(f"🎟️ Your ticket has been created: {ticket_channel.mention}", ephemeral=True)
+
+
+class CloseTicketButton(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Close", emoji="❌", style=discord.ButtonStyle.red, custom_id="close_ticket_button")
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel = interaction.channel
+        log_channel = discord.utils.get(channel.guild.channels, name="🎟️・ticket-logs")
+
+        if log_channel:
+            await log_channel.send(f"🔴 Ticket closed by {interaction.user.mention} → {channel.name}")
+
+        await interaction.response.send_message("🔒 Closing ticket in 3 seconds…", ephemeral=True)
+        await asyncio.sleep(3)
+
+        try:
+            await channel.delete()
+        except:
+            pass
+
+# --- Payment buttons view ---
+class PaymentView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(Button(label="💳 PayPal", style=discord.ButtonStyle.primary, url="https://paypal.me/Novaxco"))
+        self.add_item(Button(label="💰 Crypto", style=discord.ButtonStyle.primary, custom_id="crypto"))
+        self.add_item(Button(label="🌐 Website", style=discord.ButtonStyle.primary, url="https://rebrand.ly/tanaflix"))
+
+# --- Paid confirmation button view ---
+class PaidView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(Button(label="✅ Payment Completed", style=discord.ButtonStyle.success, custom_id="paid"))
+
+# ============================================================
+# COMMANDS
+# ============================================================
+class PaymentChoiceView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(Button(label="💳 PayPal", style=discord.ButtonStyle.primary, custom_id="paypal"))
+        self.add_item(Button(label="🌐 Website", style=discord.ButtonStyle.primary, custom_id="site"))
+        self.add_item(Button(label="💰 Crypto", style=discord.ButtonStyle.primary, custom_id="crypto"))
+
+# ================= COMMAND +SELL =================
+bot.remove_command("sell")  # remove old command if exists
+@bot.command()
+async def sell(ctx):
+    embed = discord.Embed(
+        title="🛒 VIP Offer",
+        description="Click the button below to choose the VIP offer.",
+        color=discord.Color.blue()
+    )
+    view = View()
+    view.add_item(Button(label="💎 VIP", style=discord.ButtonStyle.primary, custom_id="vip"))
+    await ctx.send(embed=embed, view=view)
+
+# ================= INTERACTION HANDLER =================
+@bot.event
+async def on_interaction(interaction: discord.Interaction):
+    if not interaction.type == discord.InteractionType.component:
+        return
+
+    custom_id = interaction.data.get("custom_id")
+    guild = interaction.guild
+    staff_role = guild.get_role(STAFF_ROLE_ID)
+    user = interaction.user
+
+    # --- VIP button ---
+    if custom_id == "vip":
+        embed = discord.Embed(
+            title="💰 Choose your payment method",
+            description=(
+                "Select a payment method:\n"
+                "- 💳 PayPal → €10\n"
+                "- 🌐 Website → €1.14\n"
+                "- 💰 Crypto → €15"
+            ),
+            color=discord.Color.blue()
+        )
+        view = PaymentChoiceView()
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    # --- PayPal ---
+    elif custom_id == "paypal":
+        embed = discord.Embed(
+            title="💳 PayPal - €10",
+            description=(
+                "1️⃣ Click the button below to pay via PayPal\n"
+                "2️⃣ Choose the **Friends & Family** option\n"
+                "3️⃣ In the **payment note**, enter **ONLY your Discord username**\n"
+                "4️⃣ After payment, click **✅ Payment Completed** below."
+            ),
+            color=discord.Color.green()
+        )
+        view = View()
+        view.add_item(Button(label="💳 Pay via PayPal", style=discord.ButtonStyle.link, url="https://paypal.me/Novaxco"))
+        view.add_item(Button(label="✅ Payment Completed", style=discord.ButtonStyle.success, custom_id="paid"))
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    # --- Website ---
+    elif custom_id == "site":
+        embed = discord.Embed(
+            title="🌐 Website - €1.14",
+            description=(
+                "1️⃣ Click the button below to pay on our website\n"
+                "2️⃣ Follow the instructions to complete the payment\n"
+                "3️⃣ After payment, click **✅ Payment Completed** below."
+            ),
+            color=discord.Color.blue()
+        )
+        view = View()
+        view.add_item(Button(label="🌐 Pay on Website", style=discord.ButtonStyle.link, url="https://rebrand.ly/tanaflix"))
+        view.add_item(Button(label="✅ Payment Completed", style=discord.ButtonStyle.success, custom_id="paid"))
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    # --- Crypto ---
+    elif custom_id == "crypto":
+        await interaction.response.send_message(
+            f"💰 Please open a ticket to pay with crypto (€15).\n{STAFF_ROLE_MENTION}",
+            ephemeral=True
+        )
+
+    # --- Payment Completed ---
+    elif custom_id == "paid":
+        # Message to user
+        embed = discord.Embed(
+            title="⏳ Payment in progress",
+            description=f"{user.mention}, your payment is being verified by an administrator.",
+            color=discord.Color.orange()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        # Notify staff in payment logs channel
+        log_channel = discord.utils.get(guild.channels, name="payment-logs")
+        if log_channel:
+            await log_channel.send(f"{staff_role.mention} {user.mention} clicked ✅ Payment Completed, verification needed.")
+
+# ============================================================
+# TICKET MESSAGE HANDLING
+# ============================================================
+@bot.event
+async def on_message(message):
+    if message.author == bot.user:
+        return
+
+    channel = message.channel
+    user = message.author
+    msg = message.content.lower()
+
+    if not isinstance(channel, discord.TextChannel) or not channel.name.startswith("ticket-"):
+        return await bot.process_commands(message)
+
+    if channel.id not in ongoing_tickets:
+        ongoing_tickets[channel.id] = "ASKING_VIP"
+
+    state = ongoing_tickets[channel.id]
+
+    # STEP 1: Ask about VIP
+    if state == "ASKING_VIP":
+        if is_positive(msg):
+            ongoing_tickets[channel.id] = "WAITING_PAYMENT"
+            await channel.send(f"""
+Here are our **VIP** offers:
+
+💳 **Website**: €1.14 lifetime  
+🅿️ **PayPal**: €12 lifetime  
+🪙 **Crypto**: €12 lifetime  
+💵 **Paysafecard**: €10 lifetime  
+
+Reply with **website**, **paypal**, **crypto**, or **paysafecard**.  
+{user.mention}
+""")
+        elif is_negative(msg):
+            await channel.send(f"Understood, closing your ticket {user.mention} 👋")
+            await asyncio.sleep(2)
+            return await channel.delete()
+        else:
+            await channel.send(f"Please reply with **yes** or **no** {user.mention} 😊")
+
+    # STEP 2: Choose payment method
+    elif state == "WAITING_PAYMENT":
+        if "website" in msg:
+            ongoing_tickets[channel.id] = "WAITING_PROOF"
+            await channel.send("Here is the link to pay:\n👉 https://rebrand.ly/tanaflix\nSend a screenshot once done 📸")
+
+        elif "paypal" in msg:
+            ongoing_tickets[channel.id] = "WAITING_PROOF"
+            await channel.send("PayPal link:\n👉 https://paypal.me/Novaxco\nSend a screenshot of the payment 📸")
+
+        elif "crypto" in msg or "paysafecard" in msg:
+            ongoing_tickets[channel.id] = "WAITING_STAFF"
+            await channel.send(f"{STAFF_ROLE_MENTION} A staff member will verify this payment.")
+
+        else:
+            await channel.send("Unknown method 😅 Reply with: **website**, **paypal**, **crypto**, or **paysafecard**.")
+
+    # STEP 3: Verify proof
+    elif state == "WAITING_PROOF":
+        if message.attachments:
+            staff_role = message.guild.get_role(STAFF_ROLE_ID)
+            await channel.send(f"{staff_role.mention} {user.mention} sent a screenshot for verification.")
+        else:
+            await channel.send(f"Please send a **screenshot** of the payment {user.mention} 📸")
+
+    await bot.process_commands(message)
+
+@bot.command()
+@commands.has_permissions(manage_channels=True)
+async def nsfw(ctx):
+    channel = ctx.channel
+
+    if channel.is_nsfw():
+        await ctx.send("❌ This channel is already NSFW.")
+        return
+
+    try:
+        await channel.edit(nsfw=True)
+        await ctx.send("✅ This channel has been set to NSFW.")
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to edit this channel.")
+    except Exception as e:
+        await ctx.send(f"❌ An error occurred: {e}")
+
+@bot.command()
+@commands.has_permissions(manage_channels=True)
+async def nsfwc(ctx):
+    category = ctx.channel.category  # get the category of the current channel
+
+    if not category:
+        await ctx.send("❌ This channel is not in a category.")
+        return
+
+    edited_channels = []
+    failed_channels = []
+
+    for channel in category.channels:
+        if isinstance(channel, discord.TextChannel):
+            try:
+                if not channel.is_nsfw():
+                    await channel.edit(nsfw=True)
+                    edited_channels.append(channel.name)
+            except discord.Forbidden:
+                failed_channels.append(channel.name)
+            except Exception as e:
+                failed_channels.append(f"{channel.name} ({e})")
+
+    message = ""
+    if edited_channels:
+        message += f"✅ The following channels were set to NSFW:\n" + "\n".join(edited_channels) + "\n"
+    if failed_channels:
+        message += f"❌ Failed to set NSFW for:\n" + "\n".join(failed_channels)
+
+    await ctx.send(message)
+
+
+
+# ============================================================
+# RUN BOT
+# ============================================================
+bot.run(TOKEN)
